@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>テトリス風ゲーム</title>
+  <style>
+    :root{
+      --bg:#0b1020; --panel:#121833; --accent:#7dd3fc; --text:#e6ecff; --muted:#93a4bf;
+      --tile-size:32px;
+    }
+    *{box-sizing:border-box}
+    body{margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+      background:linear-gradient(135deg,#0b1020,#10172a 35%,#0f172a); color:var(--text); display:grid; place-items:center; min-height:100svh}
+    .wrap{display:grid; grid-template-columns: auto 260px; gap:18px; padding:20px}
+    .panel{background:var(--panel); border:1px solid rgba(255,255,255,.06); border-radius:18px; box-shadow:0 10px 30px rgba(0,0,0,.35)}
+    .stage{padding:14px}
+    canvas{display:block; background:radial-gradient(1200px 400px at -20% -30%, #0a122a, #0a0f20 60%);
+      border-radius:14px; outline:1px solid rgba(255,255,255,.04)}
+    .hud{padding:16px; display:flex; flex-direction:column; gap:14px}
+    .hud h1{font-size:20px; margin:0 0 8px; color:#c7d2fe}
+    .stat{display:grid; grid-template-columns:1fr auto; gap:6px; padding:10px 12px; background:rgba(255,255,255,.03); border-radius:12px}
+    .preview{display:grid; grid-template-columns:repeat(2,1fr); gap:10px}
+    .box{padding:10px; background:rgba(255,255,255,.03); border-radius:12px}
+    .kbd{display:grid; grid-template-columns:repeat(3,1fr); gap:8px; margin-top:6px}
+    button{appearance:none; border:none; border-radius:12px; padding:10px; background:#1e293b; color:var(--text); font-size:14px; cursor:pointer; box-shadow:inset 0 0 0 1px rgba(255,255,255,.06)}
+    button:active{transform:translateY(1px)}
+    .row{display:flex; gap:8px}
+    .wide{grid-column:1/-1}
+    .muted{color:var(--muted); font-size:12px}
+    .footer{padding:8px 12px 14px; font-size:12px; color:var(--muted)}
+    @media (max-width:900px){
+      :root{--tile-size:28px}
+      .wrap{grid-template-columns:1fr; gap:12px}
+      .hud{order:-1}
+      .kbd{grid-template-columns:repeat(5,1fr)}
+      .only-desktop{display:none}
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="stage panel">
+      <canvas id="game" width="320" height="640" aria-label="Tetris-like playfield" role="img"></canvas>
+    </div>
+    <aside class="hud panel">
+      <div>
+        <h1>テトリス風</h1>
+        <div class="stat"><span>スコア</span><strong id="score">0</strong></div>
+        <div class="stat"><span>レベル</span><strong id="level">1</strong></div>
+        <div class="stat"><span>ライン</span><strong id="lines">0</strong></div>
+      </div>
+      <div class="preview">
+        <div class="box">
+          <div class="muted">NEXT</div>
+          <canvas id="next" width="128" height="128"></canvas>
+        </div>
+        <div class="box">
+          <div class="muted">HOLD</div>
+          <canvas id="hold" width="128" height="128"></canvas>
+        </div>
+        <button id="start" class="wide">▶ スタート / ポーズ (P)</button>
+      </div>
+      <div class="box">
+        <div class="muted">操作</div>
+        <div class="kbd">
+          <button data-act="left">←</button>
+          <button data-act="down">↓</button>
+          <button data-act="right">→</button>
+          <button data-act="rotateL">↶</button>
+          <button data-act="rotateR">↷</button>
+          <button data-act="hard" class="wide">⬇ ハードドロップ (Space)</button>
+          <button data-act="hold" class="wide">HOLD (Shift)</button>
+        </div>
+      </div>
+      <div class="footer">矢印キー：移動／回転、<span class="only-desktop">Z/X：回転、</span>Space：ハードドロップ、Shift：ホールド、P：ポーズ</div>
+    </aside>
+  </div>
+
+  <script>
+  // ==== 基本設定 ====
+  const COLS = 10, ROWS = 20, SIZE = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--tile-size'));
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  canvas.width = COLS * SIZE; canvas.height = ROWS * SIZE;
+  const nextCanvas = document.getElementById('next');
+  const nextCtx = nextCanvas.getContext('2d');
+  const holdCanvas = document.getElementById('hold');
+  const holdCtx = holdCanvas.getContext('2d');
+
+  const scoreEl = document.getElementById('score');
+  const levelEl = document.getElementById('level');
+  const linesEl = document.getElementById('lines');
+  const startBtn = document.getElementById('start');
+
+  const COLORS = {
+    I:'#67e8f9', J:'#60a5fa', L:'#f59e0b', O:'#fde047', S:'#34d399', T:'#c084fc', Z:'#f87171', GHOST:'rgba(255,255,255,.25)'
+  };
+
+  // 7種ミノ（SRS回転原型）
+  const SHAPES = {
+    I:[ [0,1],[1,1],[2,1],[3,1] ],
+    J:[ [0,0],[0,1],[1,1],[2,1] ],
+    L:[ [2,0],[0,1],[1,1],[2,1] ],
+    O:[ [1,0],[2,0],[1,1],[2,1] ],
+    S:[ [1,0],[2,0],[0,1],[1,1] ],
+    T:[ [1,0],[0,1],[1,1],[2,1] ],
+    Z:[ [0,0],[1,0],[1,1],[2,1] ],
+  };
+
+  // SRS簡易ウォールキック（Iと他で別テーブル）
+  const KICKS = {
+    normal:[ [0,0],[1,0],[-1,0],[0,1],[0,-1],[2,0],[-2,0] ],
+    I:[ [0,0],[1,0],[-1,0],[2,0],[-2,0],[0,1],[0,-1] ],
+  };
+
+  // ==== ユーティリティ ====
+  const rand = n => Math.floor(Math.random()*n);
+  function makeMatrix(w,h,fill=0){ return Array.from({length:h},()=>Array(w).fill(fill)); }
+  function clone(o){ return JSON.parse(JSON.stringify(o)); }
+
+  // ==== バッグ乱数 ====
+  class Bag {
+    constructor(){ this.bag=[]; }
+    next(){
+      if(this.bag.length===0){ this.bag = Object.keys(SHAPES); for(let i=this.bag.length-1;i>0;i--){ const j=rand(i+1); [this.bag[i],this.bag[j]]=[this.bag[j],this.bag[i]]; } }
+      return this.bag.pop();
+    }
+  }
+
+  // ==== ゲーム状態 ====
+  const state = {
+    board: makeMatrix(COLS, ROWS, 0),
+    bag: new Bag(),
+    cur: null,
+    next: [],
+    hold: null,
+    canHold: true,
+    score: 0,
+    level: 1,
+    lines: 0,
+    dropInterval: 1000,
+    lastTime: 0,
+    acc: 0,
+    paused: true,
+    gameOver: false,
+  };
+
+  // 3つ先までのプレビュー
+  while(state.next.length < 3){ state.next.push(spawnPiece()); }
+
+  function spawnPiece(){
+    const type = state.bag.next();
+    return { type, rot:0, pos:{x:3,y:0}, cells: clone(SHAPES[type]) };
+  }
+
+  function takeNext(){
+    const p = state.next.shift();
+    state.next.push(spawnPiece());
+    p.pos = {x:3,y:0}; p.rot=0; p.cells=clone(SHAPES[p.type]);
+    return p;
+  }
+
+  function rotate(p, dir){ // dir = +1 or -1
+    const center = {x:1.5, y:1.0}; // おおよそ中心
+    const rotated = p.cells.map(([x,y])=>{
+      const dx = x - center.x, dy = y - center.y;
+      const rx = dir>0 ? -dy : dy;
+      const ry = dir>0 ? dx : -dx;
+      return [Math.round(rx + center.x), Math.round(ry + center.y)];
+    });
+    return rotated;
+  }
+
+  function collides(board, cells, pos){
+    return cells.some(([x,y])=>{
+      const nx = x + pos.x, ny = y + pos.y;
+      return nx<0 || nx>=COLS || ny>=ROWS || (ny>=0 && board[ny][nx]);
+    });
+  }
+
+  function lockPiece(){
+    const {cur, board} = state;
+    cur.cells.forEach(([x,y])=>{
+      const nx = x + cur.pos.x, ny = y + cur.pos.y;
+      if(ny>=0 && ny<ROWS && nx>=0 && nx<COLS) board[ny][nx] = cur.type;
+    });
+    clearLines();
+    state.cur = takeNext();
+    state.canHold = true;
+    if(collides(state.board, state.cur.cells, state.cur.pos)){
+      state.gameOver = true; state.paused = true; startBtn.textContent = '🔁 リスタート';
+    }
+  }
+
+  function clearLines(){
+    let cleared = 0;
+    for(let y=ROWS-1; y>=0; y--){
+      if(state.board[y].every(v=>v)){
+        state.board.splice(y,1);
+        state.board.unshift(Array(COLS).fill(0));
+        cleared++; y++;
+      }
+    }
+    if(cleared){
+      const scores = [0, 100, 300, 500, 800];
+      state.score += scores[cleared] * state.level;
+      state.lines += cleared;
+      if(state.lines >= state.level*10){ state.level++; state.dropInterval = Math.max(120, 1000 - (state.level-1)*80); }
+    }
+  }
+
+  function tryRotate(dir){
+    const p = state.cur;
+    const rotated = rotate(p, dir);
+    const kicks = (p.type==='I')?KICKS.I:KICKS.normal;
+    for(const [kx,ky] of kicks){
+      const pos = {x:p.pos.x+kx, y:p.pos.y+ky};
+      if(!collides(state.board, rotated, pos)){
+        p.cells = rotated; p.pos = pos; return true;
+      }
+    }
+    return false;
+  }
+
+  function hardDrop(){
+    while(!collides(state.board, state.cur.cells, {x:state.cur.pos.x,y:state.cur.pos.y+1})){
+      state.cur.pos.y++;
+    }
+    lockPiece();
+  }
+
+  function hold(){
+    if(!state.canHold) return;
+    if(state.hold==null){ state.hold = {...state.cur, pos:{x:0,y:0}}; state.cur = takeNext(); }
+    else { const tmp = state.hold; state.hold = {...state.cur, pos:{x:0,y:0}}; state.cur = tmp; }
+    state.cur.pos = {x:3,y:0}; state.cur.rot=0; state.cur.cells=clone(SHAPES[state.cur.type]);
+    state.canHold = false;
+  }
+
+  function softDrop(){
+    const nextPos = {x:state.cur.pos.x, y:state.cur.pos.y+1};
+    if(!collides(state.board, state.cur.cells, nextPos)){ state.cur.pos = nextPos; }
+    else { lockPiece(); }
+  }
+
+  function move(dx){
+    const nextPos = {x:state.cur.pos.x+dx,y:state.cur.pos.y};
+    if(!collides(state.board, state.cur.cells, nextPos)) state.cur.pos = nextPos;
+  }
+
+  function reset(){
+    state.board = makeMatrix(COLS, ROWS, 0);
+    state.bag = new Bag();
+    state.next = [spawnPiece(), spawnPiece(), spawnPiece()];
+    state.cur = takeNext();
+    state.hold = null; state.canHold = true;
+    state.score=0; state.level=1; state.lines=0; state.dropInterval=1000; state.acc=0; state.gameOver=false;
+  }
+
+  // ==== 描画 ====
+  function drawCell(gc, x,y, color, tile=SIZE){
+    const px = x*tile, py=y*tile;
+    gc.fillStyle = color;
+    gc.fillRect(px,py,tile,tile);
+    // 立体感
+    gc.fillStyle = 'rgba(255,255,255,.12)';
+    gc.fillRect(px,py,tile,4);
+    gc.fillStyle = 'rgba(0,0,0,.15)';
+    gc.fillRect(px,py+tile-4,tile,4);
+    gc.fillRect(px+tile-4,py,4,tile);
+  }
+
+  function drawBoard(){
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    // グリッド
+    ctx.strokeStyle = 'rgba(255,255,255,.04)';
+    for(let x=1;x<COLS;x++){ ctx.beginPath(); ctx.moveTo(x*SIZE,0); ctx.lineTo(x*SIZE,ROWS*SIZE); ctx.stroke(); }
+    for(let y=1;y<ROWS;y++){ ctx.beginPath(); ctx.moveTo(0,y*SIZE); ctx.lineTo(COLS*SIZE,y*SIZE); ctx.stroke(); }
+
+    // 固定ブロック
+    for(let y=0;y<ROWS;y++) for(let x=0;x<COLS;x++){
+      const t = state.board[y][x]; if(t){ drawCell(ctx,x,y,COLORS[t]); }
+    }
+
+    // ゴースト
+    const ghostY = ghostDropY();
+    state.cur.cells.forEach(([x,y])=>{
+      const gx = x + state.cur.pos.x, gy = y + ghostY;
+      if(gy>=0) drawCell(ctx,gx,gy,COLORS.GHOST);
+    });
+
+    // 現在のミノ
+    state.cur.cells.forEach(([x,y])=>{
+      const nx = x + state.cur.pos.x, ny = y + state.cur.pos.y;
+      if(ny>=0) drawCell(ctx,nx,ny,COLORS[state.cur.type]);
+    });
+  }
+
+  function ghostDropY(){
+    let y = state.cur.pos.y;
+    while(!collides(state.board, state.cur.cells, {x:state.cur.pos.x, y:y+1})) y++;
+    return y;
+  }
+
+  function drawMini(canvasCtx, piece){
+    const tile = 24; // ミニ表示用
+    canvasCtx.clearRect(0,0,128,128);
+    if(!piece) return;
+    const cells = SHAPES[piece.type];
+    // 中央寄せ
+    const xs = cells.map(([x])=>x), ys=cells.map(([,y])=>y);
+    const minx = Math.min(...xs), maxx=Math.max(...xs), miny=Math.min(...ys), maxy=Math.max(...ys);
+    const w = (maxx-minx+1), h=(maxy-miny+1);
+    const offx = Math.floor((128 - w*tile)/2);
+    const offy = Math.floor((128 - h*tile)/2);
+    cells.forEach(([x,y])=>{
+      const px = (x-minx), py=(y-miny);
+      drawCell(canvasCtx, px, py, COLORS[piece.type], tile);
+    });
+    // translate to offset without changing drawCell util
+    // Quick hack: drawCell uses tile units; we shift using transform
+    // Instead, we redraw to an offscreen canvas and blit. Simpler: save/restore with translate
+  }
+
+  // drawMini 用に上書き：タイル単位→ピクセル変換
+  (function(){
+    const _draw = drawCell;
+    window.drawCell = function(gc, x,y,color,tile){
+      const px = x*tile, py=y*tile;
+      gc.save();
+      gc.translate( (gc===nextCtx||gc===holdCtx)? (128 - Math.ceil(4*tile))/2 : 0, (gc===nextCtx||gc===holdCtx)? (128 - Math.ceil(4*tile))/2 : 0 );
+      _draw(gc, x, y, color, tile);
+      gc.restore();
+    }
+  })();
+
+  function renderSide(){
+    scoreEl.textContent = state.score;
+    levelEl.textContent = state.level;
+    linesEl.textContent = state.lines;
+
+    nextCtx.clearRect(0,0,128,128);
+    holdCtx.clearRect(0,0,128,128);
+
+    // NEXT: 上から順に小さめ表示
+    const tile=20;
+    state.next.slice(0,3).forEach((p,i)=>{
+      const cells = SHAPES[p.type];
+      const xs=cells.map(([x])=>x), ys=cells.map(([,y])=>y);
+      const minx=Math.min(...xs), miny=Math.min(...ys);
+      const offx = 12; const offy = 10 + i*40;
+      cells.forEach(([x,y])=>{
+        const cx = (x-minx); const cy=(y-miny);
+        nextCtx.save(); nextCtx.translate(offx,offy); _drawMini(nextCtx, cx, cy, COLORS[p.type], tile); nextCtx.restore();
+      });
+    });
+
+    // HOLD
+    if(state.hold){
+      const cells = SHAPES[state.hold.type];
+      const xs=cells.map(([x])=>x), ys=cells.map(([,y])=>y);
+      const minx=Math.min(...xs), miny=Math.min(...ys);
+      const tileH=22; const offx=14, offy=20;
+      cells.forEach(([x,y])=>{
+        const cx=(x-minx), cy=(y-miny);
+        holdCtx.save(); holdCtx.translate(offx,offy); _drawMini(holdCtx, cx, cy, COLORS[state.hold.type], tileH); holdCtx.restore();
+      });
+    }
+  }
+
+  function _drawMini(gc,x,y,color,tile){
+    gc.fillStyle = color;
+    gc.fillRect(x*tile, y*tile, tile, tile);
+    gc.fillStyle = 'rgba(255,255,255,.12)';
+    gc.fillRect(x*tile, y*tile, tile, 3);
+    gc.fillStyle = 'rgba(0,0,0,.15)';
+    gc.fillRect(x*tile, y*tile+tile-3, tile, 3);
+    gc.fillRect(x*tile+tile-3, y*tile, 3, tile);
+  }
+
+  // ==== ループ ====
+  function update(ts){
+    if(state.paused){ drawBoard(); renderSide(); return requestAnimationFrame(update); }
+    const dt = ts - state.lastTime; state.lastTime = ts; state.acc += dt;
+    while(state.acc >= state.dropInterval){ softDrop(); state.acc -= state.dropInterval; }
+    drawBoard(); renderSide();
+    requestAnimationFrame(update);
+  }
+
+  // ==== 入力 ====
+  const keymap = new Map([
+    ['ArrowLeft', ()=>move(-1)],
+    ['ArrowRight', ()=>move(1)],
+    ['ArrowDown', ()=>softDrop()],
+    ['ArrowUp', ()=>tryRotate(1)],
+    ['KeyZ', ()=>tryRotate(-1)],
+    ['KeyX', ()=>tryRotate(1)],
+    ['Space', ()=>hardDrop()],
+    ['ShiftLeft', ()=>hold()],
+    ['ShiftRight', ()=>hold()],
+    ['KeyP', ()=>togglePause()],
+  ]);
+
+  window.addEventListener('keydown', (e)=>{
+    if(state.gameOver && e.code!=='KeyP' && e.code!=='Enter'){ e.preventDefault(); return; }
+    const fn = keymap.get(e.code); if(fn){ e.preventDefault(); fn(); }
+  }, {passive:false});
+
+  // タッチUI
+  document.querySelectorAll('[data-act]').forEach(btn=>{
+    const act = btn.getAttribute('data-act');
+    const map = {
+      left:()=>move(-1), right:()=>move(1), down:()=>softDrop(), rotateL:()=>tryRotate(-1), rotateR:()=>tryRotate(1), hard:()=>hardDrop(), hold:()=>hold()
+    };
+    btn.addEventListener('click',()=>map[act] && map[act]());
+  });
+
+  function togglePause(){
+    if(state.gameOver){ reset(); }
+    state.paused = !state.paused;
+    startBtn.textContent = state.paused ? '▶ スタート / ポーズ (P)' : '⏸ ポーズ (P)';
+  }
+
+  startBtn.addEventListener('click', togglePause);
+
+  // 初期開始
+  state.cur = takeNext();
+  requestAnimationFrame(update);
+
+  // 視認性向上: フォーカス時にキーボード案内
+  canvas.addEventListener('click', ()=>canvas.focus());
+  </script>
+</body>
+</html>
